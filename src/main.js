@@ -869,21 +869,28 @@ function drawResult() {
   ctx.font = 'bold 46px ui-sans-serif, system-ui';
   ctx.fillText(r.anchorHolds ? 'ANCHOR HELD' : 'ANCHOR FAILED', cx, 150);
 
-  let y = 220;
+  // legend for the per-piece verdict markers
+  ctx.font = '12px ui-sans-serif, system-ui'; ctx.fillStyle = '#7e8aa3';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('✓ holds a fall   ·   ✗ blows', cx, 186);
+
+  let y = 222;
   state.placements.forEach((p) => {
     const col = p.score >= 70 ? COLORS.good : p.score >= 40 ? COLORS.warn : COLORS.bad;
-    ctx.textAlign = 'right'; ctx.fillStyle = col;
+    // verdict marker — to the LEFT of the numerical score
+    ctx.textAlign = 'right';
+    ctx.fillStyle = p.hold ? COLORS.good : COLORS.bad;
+    ctx.font = 'bold 17px ui-sans-serif, system-ui';
+    ctx.fillText(p.hold ? '✓' : '✗', cx - 184, y);
+    // score
+    ctx.fillStyle = col;
     ctx.font = 'bold 18px ui-sans-serif, system-ui';
     ctx.fillText(String(p.score), cx - 150, y);
+    // name + strength + crack diameter + note
     ctx.textAlign = 'left'; ctx.fillStyle = COLORS.hudText;
     ctx.font = '16px ui-sans-serif, system-ui';
     const dia = p.widthMm != null ? ` [${Math.round(p.widthMm)} mm]` : '';
     ctx.fillText(`${placementName(p)} · ${p.kN}kN${dia} — ${p.note}`, cx - 130, y);
-    // per-piece verdict: would this single piece hold the fall?
-    ctx.textAlign = 'right';
-    ctx.fillStyle = p.hold ? COLORS.good : COLORS.bad;
-    ctx.font = 'bold 15px ui-sans-serif, system-ui';
-    ctx.fillText(p.hold ? '✓ holds' : '✗ blows', cx + 300, y);
     y += 32;
   });
 
