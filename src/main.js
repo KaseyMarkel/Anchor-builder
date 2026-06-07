@@ -178,45 +178,126 @@ function nearestSample(px, py) {
   return best;
 }
 
+// Desktop (mouse): click to grab, cursor-follow, click to place, SPACE retracts.
+// Touch: tap/drag to grab + position, two-finger pinch retracts a cam, lift to
+// place. Both share these handlers, branching on pointer type.
+const isTouch = window.matchMedia('(pointer: coarse)').matches;
+const pointers = new Map();        // pointerId -> {id,x,y,sx,sy,type}
+let pinch = null;                  // {baseDist, baseRetraction}
+const PINCH_RANGE = 260;           // logical px of pinch travel ≈ full retraction
+
+function dist2(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+function touchPoints() {
+  const a = [];
+  for (const v of pointers.values()) if (v.type !== 'mouse') a.push(v);
+  return a;
+}
+function activeTouchCount() { return touchPoints().length; }
+
+function clipPin(pin) {
+  pin.used = true;
+  state.placements.push({
+    type: 'pin', pin, x: pin.x, y: pin.y, kN: pin.kN, widthMm: pin.widthMm,
+    score: pin.score, note: pin.note, hold: pin.hold
+  });
+  state.stamina = clamp(state.stamina - 0.02, 0, 1);
+  state.hint = false;
+  if (state.placements.length >= MAX_PIECES) startFallTest();
+}
+
 canvas.addEventListener('pointerdown', (e) => {
   e.preventDefault();
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
   const p = toLogical(e);
+  pointers.set(e.pointerId, { id: e.pointerId, x: p.x, y: p.y, sx: p.x, sy: p.y, type: e.pointerType });
+  const touch = e.pointerType !== 'mouse';
 
   if (state.phase === 'result') { bankAndAdvance(); return; }
   if (state.phase !== 'play') return;
 
-  // 1) rack: grab (or switch) a piece
+  // second finger on a held cam → begin pinch-to-retract (squish the lobes in)
+  if (touch && state.drag && state.drag.gear.kind === 'cam' && activeTouchCount() === 2) {
+    const [a, b] = touchPoints();
+    pinch = { baseDist: dist2(a, b), baseRetraction: state.drag.retraction };
+    state.drag.x = (a.x + b.x) / 2; state.drag.y = (a.y + b.y) / 2;
+    return;
+  }
+
+  // rack: grab (or switch) a piece
   for (const rr of state.rackRects) {
     if (p.x >= rr.x && p.x <= rr.x + rr.w && p.y >= rr.y && p.y <= rr.y + rr.h) {
-      if (!rr.gear.used) state.drag = { gear: rr.gear, idx: rr.index, x: p.x, y: p.y, retraction: 0 };
+      if (!rr.gear.used) {
+        state.drag = { gear: rr.gear, idx: rr.index, x: p.x, y: p.y, retraction: 0, touch, posId: e.pointerId };
+      }
       return;
     }
   }
 
-  // 2) holding a piece: this click places it
-  if (state.drag) { tryPlace(); return; }
+  // holding a piece
+  if (state.drag) {
+    if (touch) { state.drag.posId = e.pointerId; state.drag.x = p.x; state.drag.y = p.y; }
+    else tryPlace();                 // desktop: a click places
+    return;
+  }
 
-  // 3) clip an old pin
-  for (const pin of state.pins) {
-    if (!pin.used && Math.hypot(p.x - pin.x, p.y - pin.y) < 18) {
-      pin.used = true;
-      state.placements.push({
-        type: 'pin', pin, x: pin.x, y: pin.y, kN: pin.kN, widthMm: pin.widthMm,
-        score: pin.score, note: pin.note, hold: pin.hold
-      });
-      state.stamina = clamp(state.stamina - 0.02, 0, 1);
-      state.hint = false;
-      if (state.placements.length >= MAX_PIECES) startFallTest();
-      return;
+  // desktop clips a pin on click; touch clips on a tap (handled in pointerup)
+  if (!touch) {
+    for (const pin of state.pins) {
+      if (!pin.used && Math.hypot(p.x - pin.x, p.y - pin.y) < 18) { clipPin(pin); return; }
     }
   }
 });
 
 canvas.addEventListener('pointermove', (e) => {
-  if (!state.drag) return;
+  const rec = pointers.get(e.pointerId);
   const p = toLogical(e);
-  state.drag.x = p.x;
-  state.drag.y = p.y;
+  if (rec) { rec.x = p.x; rec.y = p.y; }
+  if (!state.drag) return;
+
+  if (pinch && state.drag.gear.kind === 'cam' && activeTouchCount() >= 2) {
+    const [a, b] = touchPoints();
+    state.drag.retraction = clamp(pinch.baseRetraction + (pinch.baseDist - dist2(a, b)) / PINCH_RANGE, 0, 1);
+    state.drag.x = (a.x + b.x) / 2; state.drag.y = (a.y + b.y) / 2;
+    return;
+  }
+  if (e.pointerType === 'mouse' || e.pointerId === state.drag.posId) {
+    state.drag.x = p.x; state.drag.y = p.y;
+  }
+});
+
+canvas.addEventListener('pointerup', (e) => {
+  const rec = pointers.get(e.pointerId);
+  const moved = rec ? Math.hypot(rec.x - rec.sx, rec.y - rec.sy) : 0;
+  const type = rec ? rec.type : e.pointerType;
+  pointers.delete(e.pointerId);
+  try { canvas.releasePointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+  if (type === 'mouse' || state.phase !== 'play') return;
+
+  // dropped below two fingers → end the pinch, hand positioning to the survivor
+  if (pinch && activeTouchCount() < 2) {
+    pinch = null;
+    const rem = touchPoints()[0];
+    if (rem && state.drag) state.drag.posId = rem.id;
+  }
+
+  if (state.drag) {
+    if (activeTouchCount() === 0) {       // all fingers up → place if over a crack
+      const near = nearestSample(state.drag.x, state.drag.y);
+      if (near && near.s.dist <= 64) tryPlace();
+    }
+    return;
+  }
+
+  // a tap (not a drag) on an old pin clips it
+  if (rec && moved < 14) {
+    const pin = state.pins.find((q) => !q.used && Math.hypot(rec.x - q.x, rec.y - q.y) < 24);
+    if (pin) clipPin(pin);
+  }
+});
+
+canvas.addEventListener('pointercancel', (e) => {
+  pointers.delete(e.pointerId);
+  if (activeTouchCount() < 2) pinch = null;
 });
 
 window.addEventListener('keydown', (e) => {
@@ -242,7 +323,7 @@ function tryPlace() {
     const curW = camCurrentWidth(gear, d.retraction);
     if (curW > crackW + 1) {
       if (gear.min > crackW + 1) flash('Too big — over-cammed, it won’t fit here');
-      else flash('Hold SPACE to retract the lobes — pull the trigger');
+      else flash(isTouch ? 'Pinch two fingers to retract the cam more' : 'Hold SPACE to retract the lobes — pull the trigger');
       return;
     }
   }
@@ -328,7 +409,8 @@ function frame(t) {
 
   if (state.phase === 'play') {
     state.stamina = clamp(state.stamina - dt / PUMP_SECONDS, 0, 1);
-    if (state.drag && state.drag.gear.kind === 'cam') {
+    // desktop: SPACE animates the trigger. touch: retraction is driven by pinch.
+    if (state.drag && state.drag.gear.kind === 'cam' && !state.drag.touch) {
       const target = state.spaceHeld ? 1 : 0;
       state.drag.retraction += (target - state.drag.retraction) * Math.min(1, dt * 12);
     }
@@ -734,9 +816,12 @@ function drawRack() {
 function drawMessages() {
   if (state.drag && state.phase === 'play') {
     const g = state.drag.gear;
+    const t = state.drag.touch;
     const tip = g.kind === 'cam'
-      ? `${gearSpec(g)}  —  hold SPACE to retract, click to place`
-      : `${gearSpec(g)}  —  click a crack to place`;
+      ? (t ? `${gearSpec(g)}  —  pinch two fingers to retract, lift to place`
+           : `${gearSpec(g)}  —  hold SPACE to retract, click to place`)
+      : (t ? `${gearSpec(g)}  —  drag onto a crack, lift to place`
+           : `${gearSpec(g)}  —  click a crack to place`);
     ctx.font = '14px ui-sans-serif, system-ui';
     const w = ctx.measureText(tip).width + 36;
     ctx.fillStyle = 'rgba(8,14,28,0.82)';
@@ -749,10 +834,14 @@ function drawMessages() {
     roundRect(PLAY.x + PLAY.w / 2 - 280, PLAY.y + 14, 560, 54, 10); ctx.fill();
     ctx.fillStyle = COLORS.hudText; ctx.font = '15px ui-sans-serif, system-ui';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('Click gear to pick it up, move it over a crack, click to place — 3 per pitch.',
+    ctx.fillText(isTouch
+      ? 'Tap gear to pick it up, drag onto a crack, lift to place — 3 per pitch.'
+      : 'Click gear to pick it up, move it over a crack, click to place — 3 per pitch.',
       PLAY.x + PLAY.w / 2, PLAY.y + 32);
     ctx.fillStyle = '#9fb0d0'; ctx.font = '13px ui-sans-serif, system-ui';
-    ctx.fillText('Cams: hold SPACE to pull the trigger · Nuts/hexes lock above constrictions · Clip old pins',
+    ctx.fillText(isTouch
+      ? 'Cams: pinch two fingers to pull the trigger · Nuts/hexes lock above constrictions · Tap pins'
+      : 'Cams: hold SPACE to pull the trigger · Nuts/hexes lock above constrictions · Clip old pins',
       PLAY.x + PLAY.w / 2, PLAY.y + 52);
   }
   if (now() < flashUntil) {

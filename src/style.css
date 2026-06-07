@@ -34,3 +34,38 @@ html, body {
   cursor: pointer;
   touch-action: none;
 }
+
+/* Touch devices: go edge-to-edge for a fullscreen feel. */
+@media (pointer: coarse) {
+  #app { padding: 0; }
+  #game {
+    width: min(100%, calc(100vh * 1024 / 720));
+    max-height: 100vh;
+    border-radius: 0;
+    box-shadow: none;
+  }
+}
+
+/* The game is landscape; on a portrait phone, ask to rotate. */
+#rotate-hint { display: none; }
+@media (orientation: portrait) and (pointer: coarse) {
+  #app { display: none; }
+  #rotate-hint {
+    display: flex;
+    position: fixed;
+    inset: 0;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    text-align: center;
+    padding: 28px;
+    color: #e7ecf6;
+  }
+  #rotate-hint .ab-rotate-icon { font-size: 3rem; animation: ab-rot 2.4s ease-in-out infinite; }
+  #rotate-hint p { margin: 0; font-size: 1.05rem; line-height: 1.5; max-width: 18rem; opacity: 0.92; }
+}
+@keyframes ab-rot {
+  0%, 40% { transform: rotate(0deg); }
+  60%, 100% { transform: rotate(-90deg); }
+}
