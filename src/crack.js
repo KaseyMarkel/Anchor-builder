@@ -10,81 +10,103 @@ export function pickSystemCount() {
   return Math.random() < 0.6 ? 1 : 2;
 }
 
-export function generateSystems(count) {
-  const margin = 56;
-  const laneW = (PLAY.w - margin * 2) / count;
+// Lanes are laid with a hard outer margin and an inter-system gutter, and every
+// strand centre is inset from its lane edge by half the lane's max aperture, so
+// ribbons can never cross a lane boundary — systems are non-overlapping by
+// construction. `wobble` (0..~1.6) adds roughness for chossy rock.
+export function generateSystems(count, wobble = 0) {
+  const outer = 40, gutter = 74;
+  const laneW = (PLAY.w - outer * 2 - gutter * (count - 1)) / count;
   const systems = [];
   for (let i = 0; i < count; i++) {
-    const x0 = PLAY.x + margin + i * laneW;
-    // a lone system gets a bigger branch budget than two side-by-side ones
-    systems.push(generateSystem(x0, x0 + laneW, count === 1 ? 3 : 2));
+    const x0 = PLAY.x + outer + i * (laneW + gutter);
+    systems.push(generateSystem(x0, x0 + laneW, count === 1 ? 3 : 2, wobble));
   }
   return systems;
 }
 
-function generateSystem(x0, x1, branchBudget) {
+function generateSystem(x0, x1, branchBudget, wobble) {
   const laneW = x1 - x0;
-  const maxW = clamp((laneW - 22) / MM2PX, 34, 135);
+  // Cap aperture so a full-width ribbon still fits inside the lane with margin.
+  const maxW = clamp((laneW - 24) / MM2PX, 34, 135);
+  const inset = (maxW * MM2PX) / 2 + 6;          // keep centres this far from lane edges
+  const loX = x0 + inset, hiX = x1 - inset;
+  const cx = (lo) => clamp(lo, loX, hiX);
 
-  const topX = x0 + laneW * (0.3 + Math.random() * 0.4);
-  const botX = x0 + laneW * (0.3 + Math.random() * 0.4);
+  const topX = cx(x0 + laneW * (0.3 + Math.random() * 0.4));
+  const botX = cx(x0 + laneW * (0.3 + Math.random() * 0.4));
   const trunk = buildStrand(topX, CRACK_TOP, botX, CRACK_BOT, maxW, {
-    wander: Math.min(laneW * 0.14, 30), M: 40
+    wander: Math.min(laneW * 0.14, 30), M: 40, wobble
   });
   const segments = [trunk];
 
-  const addBranch = () => {
-    const all = segments.flat();
-    const starts = all.filter((p) => p.y > CRACK_TOP + 50 && p.y < CRACK_BOT - 130);
-    if (!starts.length) return;
-    const S = starts[Math.floor(Math.random() * starts.length)];
-    const r = Math.random();
-    let ex, ey;
-    const side = Math.random() < 0.5 ? -1 : 1;
+  // Try to add a branch; reject candidates that run alongside (overlap) an
+  // existing strand so the system stays legible instead of a tangle.
+  const tryAddBranch = () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const all = segments.flat();
+      const starts = all.filter((p) => p.y > CRACK_TOP + 50 && p.y < CRACK_BOT - 130);
+      if (!starts.length) return;
+      const S = starts[Math.floor(Math.random() * starts.length)];
+      const r = Math.random();
+      const side = Math.random() < 0.5 ? -1 : 1;
+      let ex, ey;
 
-    if (r < 0.42) {
-      // fork down to the floor
-      ex = clamp(S.x + side * (laneW * 0.22 + Math.random() * laneW * 0.22), x0 + 18, x1 - 18);
-      ey = CRACK_BOT;
-    } else if (r < 0.78) {
-      // merge into a lower point on an existing strand → Y / island
-      const lower = all.filter((p) => p.y > S.y + 80);
-      if (lower.length) {
-        const Q = lower[Math.floor(Math.random() * lower.length)];
-        ex = Q.x; ey = Q.y;
-      } else {
-        ex = clamp(S.x + side * laneW * 0.3, x0 + 18, x1 - 18);
+      if (r < 0.42) {
+        ex = cx(S.x + side * (laneW * 0.22 + Math.random() * laneW * 0.22));
         ey = CRACK_BOT;
+      } else if (r < 0.78) {
+        const lower = all.filter((p) => p.y > S.y + 80);
+        if (lower.length) {
+          const Q = lower[Math.floor(Math.random() * lower.length)];
+          ex = Q.x; ey = Q.y;
+        } else { ex = cx(S.x + side * laneW * 0.3); ey = CRACK_BOT; }
+      } else {
+        const dir = S.x < (x0 + x1) / 2 ? 1 : -1;
+        ex = cx(S.x + dir * laneW * 0.5);
+        ey = clamp(S.y + 130 + Math.random() * 150, CRACK_TOP, CRACK_BOT);
       }
-    } else {
-      // cross the trunk to the far side → X
-      const dir = S.x < (x0 + x1) / 2 ? 1 : -1;
-      ex = clamp(S.x + dir * laneW * 0.5, x0 + 18, x1 - 18);
-      ey = clamp(S.y + 130 + Math.random() * 150, CRACK_TOP, CRACK_BOT);
-    }
 
-    segments.push(buildStrand(S.x, S.y, ex, ey, maxW, {
-      wander: Math.min(laneW * 0.1, 18), M: 28, mid: 11 + Math.random() * 15
-    }));
+      const cand = buildStrand(S.x, S.y, ex, ey, maxW, {
+        wander: Math.min(laneW * 0.1, 18), M: 28, mid: 11 + Math.random() * 15, wobble
+      });
+      // Reject if the middle of the branch shadows an existing strand.
+      if (!overlapsExisting(cand, all)) { segments.push(cand); return; }
+    }
   };
 
   for (let b = 0; b < branchBudget; b++) {
-    if (Math.random() < (b === 0 ? 0.82 : 0.5)) addBranch();
+    if (Math.random() < (b === 0 ? 0.82 : 0.5)) tryAddBranch();
   }
 
   return makeSystemApi(segments);
 }
 
+// True if the inner span of `cand` runs close-and-parallel to any existing point
+// (its endpoints are meant to touch other strands, so they're excluded).
+function overlapsExisting(cand, existing, near = 16) {
+  let hits = 0, checked = 0;
+  for (let i = 3; i < cand.length - 3; i++) {
+    checked++;
+    const c = cand[i];
+    for (const p of existing) {
+      if (Math.hypot(p.x - c.x, p.y - c.y) < near) { hits++; break; }
+    }
+  }
+  return checked > 0 && hits / checked > 0.35;
+}
+
 // Build one strand (polyline of {x,y,w}) between two endpoints. Wander is applied
 // perpendicular to the line and tapered to zero at both ends so the strand meets
 // its endpoints exactly (clean merges). Width undulates with a guaranteed
-// constriction and usually a parallel section.
+// constriction and usually a parallel section. `wobble` roughens chossy rock.
 function buildStrand(ax, ay, bx, by, maxW, opts = {}) {
   const M = opts.M || 32;
   const dx = bx - ax, dy = by - ay;
   const len = Math.max(1, Math.hypot(dx, dy));
   const px = -dy / len, py = dx / len; // perpendicular unit
   const wAmp = opts.wander || 22;
+  const wob = opts.wobble || 0;
   const wander = [
     { amp: wAmp * (0.6 + Math.random() * 0.6), freq: 0.7 + Math.random() * 1.6, phase: Math.random() * 6.28 },
     { amp: wAmp * 0.4, freq: 2 + Math.random() * 2, phase: Math.random() * 6.28 }
@@ -92,7 +114,9 @@ function buildStrand(ax, ay, bx, by, maxW, opts = {}) {
   const mid = opts.mid != null ? opts.mid : 18 + Math.random() * Math.min(30, maxW - 22);
   const oct = [
     { amp: 12 + Math.random() * 12, freq: 1 + Math.random() * 1.4, phase: Math.random() * 6.28 },
-    { amp: 6 + Math.random() * 6, freq: 2.5 + Math.random() * 2.5, phase: Math.random() * 6.28 }
+    { amp: 6 + Math.random() * 6, freq: 2.5 + Math.random() * 2.5, phase: Math.random() * 6.28 },
+    // extra high-frequency roughness only on poor rock
+    { amp: wob * (2 + Math.random() * 3), freq: 5 + Math.random() * 4, phase: Math.random() * 6.28 }
   ];
 
   const points = [];
@@ -147,7 +171,18 @@ function flattenSection(points, center) {
 
 function makeSystemApi(segments) {
   // tag every point with its strand + index, then flatten for nearest-search
-  segments.forEach((seg) => seg.forEach((p, k) => { p.seg = seg; p.k = k; }));
+  segments.forEach((seg) => seg.forEach((p, k) => {
+    p.seg = seg; p.k = k;
+    // local tangent (direction the crack runs) from neighbours, plus the
+    // aperture normal (the axis a piece bridges) = tangent rotated 90°.
+    const a = seg[Math.max(0, k - 1)];
+    const b = seg[Math.min(seg.length - 1, k + 1)];
+    const tx = b.x - a.x, ty = b.y - a.y;
+    const tl = Math.hypot(tx, ty) || 1;
+    p.tx = tx / tl; p.ty = ty / tl;
+    p.nx = -p.ty; p.ny = p.tx;                 // aperture (normal) direction
+    p.apertureAngle = Math.atan2(p.ny, p.nx);  // 0 = horizontal aperture
+  }));
   const points = segments.flat();
 
   function sampleNearest(px, py) {
@@ -157,16 +192,23 @@ function makeSystemApi(segments) {
       const d = dx * dx + dy * dy;
       if (d < bestD) { bestD = d; best = p; }
     }
-    return { x: best.x, y: best.y, w: best.w, dist: Math.sqrt(bestD), point: best };
+    return {
+      x: best.x, y: best.y, w: best.w, dist: Math.sqrt(bestD), point: best,
+      apertureAngle: best.apertureAngle
+    };
   }
 
-  // Minimum aperture in the crackwork directly below a point (any strand within
-  // a narrow x-window) — used to detect a constriction beneath a nut.
+  // Minimum aperture along the strand within `spanPx` *downhill* of a point
+  // (following the strand's own direction, so it works for diagonal cracks too)
+  // — used to detect a constriction a nut/hex can lock above.
   function minWidthBelow(point, spanPx) {
     let min = point.w;
     for (const p of points) {
-      const dy = p.y - point.y;
-      if (dy > 0 && dy <= spanPx && Math.abs(p.x - point.x) < 26) min = Math.min(min, p.w);
+      // project the offset onto the point's downhill tangent
+      const dx = p.x - point.x, dy = p.y - point.y;
+      const along = dx * point.tx + dy * point.ty;     // >0 = downhill
+      const across = Math.abs(dx * point.nx + dy * point.ny);
+      if (along > 0 && along <= spanPx && across < 26) min = Math.min(min, p.w);
     }
     return min;
   }
@@ -176,9 +218,17 @@ function makeSystemApi(segments) {
     const seg = point.seg, k = point.k;
     const a = seg[Math.max(0, k - 1)];
     const b = seg[Math.min(seg.length - 1, k + 1)];
-    const dy = Math.max(1, Math.abs(b.y - a.y));
-    return Math.abs(b.w - a.w) / dy;
+    const dl = Math.max(1, Math.hypot(b.x - a.x, b.y - a.y));
+    return Math.abs(b.w - a.w) / dl;
   }
 
-  return { segments, points, sampleNearest, minWidthBelow, flareRate };
+  // Aperture range present anywhere in this system (mm) — used to build a rack
+  // that can actually protect the pitch.
+  function widthRange() {
+    let lo = Infinity, hi = -Infinity;
+    for (const p of points) { lo = Math.min(lo, p.w); hi = Math.max(hi, p.w); }
+    return { lo, hi };
+  }
+
+  return { segments, points, sampleNearest, minWidthBelow, flareRate, widthRange };
 }

@@ -5,6 +5,9 @@ import { defineConfig } from 'vite'
 const port = Number(process.env.PORT) || 5173
 
 export default defineConfig({
+  // Relative asset paths so the build works when served from a subpath
+  // (the live site is hosted at kaseymarkel.com/anchor-builder/).
+  base: './',
   server: {
     host: '0.0.0.0',
     port,

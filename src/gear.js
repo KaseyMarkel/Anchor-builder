@@ -91,9 +91,68 @@ export const HEXES = [
   hex('11', 75, 95, 10)
 ];
 
-// Build a fresh rack for a pitch. Each entry tracks whether it's been used.
+// Build a fresh full rack for a pitch. Each entry tracks whether it's been used.
 export function makeRack() {
   return [...CAMS, ...NUTS, ...HEXES].map((g) => ({ ...g, used: false }));
+}
+
+function fitsRange(g, lo, hi) {
+  if (g.kind === 'cam' || g.kind === 'hex') return g.min <= hi && g.max >= lo;
+  return g.size >= lo * 0.7 && g.size <= hi * 1.15;       // nut
+}
+function shuffle(a) {
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// A limited, randomized rack for Challenge mode — you don't have your whole rack
+// at the anchor. Given the pitch's aperture range (mm), pick a constrained set
+// that still *covers* the crack (so the pitch is always protectable): a spread
+// of cams across the range plus a couple of passive pieces. ~6–9 pieces.
+export function makeChallengeRack(range) {
+  const lo = range.lo, hi = range.hi;
+  const pick = [];
+  const add = (g) => { if (g && !pick.includes(g)) pick.push(g); };
+
+  // Cams: a *spread* across the range — pick the cam nearest each of a few evenly
+  // spaced target apertures, so coverage is guaranteed without grabbing the whole
+  // rack. nCams scales gently with how wide the crack is.
+  const cams = CAMS.filter((g) => fitsRange(g, lo, hi));
+  const span = Math.max(1, hi - lo);
+  const nCams = Math.min(cams.length, span > 40 ? 4 : span > 18 ? 3 : 2);
+  for (let i = 0; i < nCams; i++) {
+    const target = lo + (span * (i + 0.5)) / nCams;
+    let best = null, bestD = Infinity;
+    for (const c of cams) {
+      if (pick.includes(c)) continue;
+      const d = Math.abs(c.nominal - target);
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    add(best);
+  }
+
+  // Passive: 2–3 nuts/hexes that fit the range.
+  const passive = shuffle([...NUTS, ...HEXES].filter((g) => fitsRange(g, lo, hi)));
+  const nPassive = 2 + (Math.random() < 0.5 ? 1 : 0);
+  for (const g of passive) {
+    if (pick.filter((p) => p.kind !== 'cam').length >= nPassive) break;
+    add(g);
+  }
+
+  // Fallback: if the crack is so narrow/wide that little fit, grab the nearest
+  // pieces by size so the player always has *something*.
+  if (pick.length < 4) {
+    const all = [...CAMS, ...NUTS, ...HEXES]
+      .sort((a, b) => Math.abs(a.nominal - (lo + hi) / 2) - Math.abs(b.nominal - (lo + hi) / 2));
+    for (const g of all) { if (pick.length >= 6) break; if (!pick.includes(g)) pick.push(g); }
+  }
+
+  return pick
+    .sort((a, b) => a.nominal - b.nominal)
+    .map((g) => ({ ...g, used: false }));
 }
 
 // Human-readable spec for tooltips / breakdowns.
